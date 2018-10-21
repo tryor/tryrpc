@@ -63,7 +63,7 @@ func NewClient(network, addrs string, initialCap, maxCap int, timeout ...time.Du
 
 		connFlags := make(map[string]*connConf)
 		for {
-			cf := c.connConfs[rand.Intn(2)]
+			cf := c.connConfs[rand.Intn(len(c.connConfs))]
 			conn, err = c.connect(cf)
 			if err != nil {
 				connFlags[cf.addr] = cf
