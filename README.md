@@ -11,7 +11,7 @@ To install:
 
 ## Server
 
-```golang
+```go
 package main
 
 import (
@@ -43,7 +43,7 @@ func main() {
 
 ## Client
 
-```golang
+```go
 package main
 
 import (
