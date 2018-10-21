@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,17 +19,18 @@ import (
 var ReconnectInterval time.Duration = time.Second * 1
 
 type Client struct {
-	pool         pool.Pool
-	nextId       uint32
-	connConfChan chan *connConf
-	timeout      []time.Duration //[0]-Connection timeout，[1]-Read timeout，[2]-Write timeout
+	pool      pool.Pool
+	nextId    uint32
+	connConfs []*connConf
+	timeout   []time.Duration //[0]-Connection timeout，[1]-Read timeout，[2]-Write timeout
 }
 
 type connConf struct {
 	network     string
 	addr        string
-	connErr     bool
+	connErr     error //bool
 	connErrTime time.Time
+	lock        sync.Mutex
 }
 
 func (cf *connConf) String() string {
@@ -42,11 +45,11 @@ func (cf *connConf) String() string {
 //                 If the parameter value is 0, it is ignored
 func NewClient(network, addrs string, initialCap, maxCap int, timeout ...time.Duration) (*Client, error) {
 	_addrs := strings.Split(addrs, ";")
-	connConfChan := make(chan *connConf, len(_addrs))
-	for _, addr := range _addrs {
-		connConfChan <- &connConf{network: network, addr: addr, connErr: false, connErrTime: time.Now()}
+	connConfs := make([]*connConf, len(_addrs))
+	for i, addr := range _addrs {
+		connConfs[i] = &connConf{network: network, addr: addr, connErrTime: time.Now()}
 	}
-	c := &Client{nextId: 1, connConfChan: connConfChan, timeout: timeout}
+	c := &Client{nextId: 1, connConfs: connConfs, timeout: timeout}
 	factory := func() (conn interface{}, err error) {
 
 		defer func() {
@@ -58,17 +61,16 @@ func NewClient(network, addrs string, initialCap, maxCap int, timeout ...time.Du
 			}
 		}()
 
-		for i := 0; i < len(_addrs); i++ {
-			connConf, ok := <-c.connConfChan
-			if ok {
-				conn, err = c.connect(connConf)
-				c.connConfChan <- connConf
-				if err != nil {
-					continue
+		connFlags := make(map[string]*connConf)
+		for {
+			cf := c.connConfs[rand.Intn(2)]
+			conn, err = c.connect(cf)
+			if err != nil {
+				connFlags[cf.addr] = cf
+				if len(connFlags) >= len(_addrs) {
+					break
 				}
-			} else {
-				err = errors.New("Connection configuration information not found!")
-				break
+				continue
 			}
 			break
 		}
@@ -105,16 +107,26 @@ func NewClient(network, addrs string, initialCap, maxCap int, timeout ...time.Du
 	return c, nil
 }
 
-func (cf *connConf) connectError(connErr bool) {
-	if connErr {
+func (cf *connConf) connectError(err error) {
+	cf.lock.Lock()
+	defer cf.lock.Unlock()
+	if err != nil {
 		cf.connErrTime = time.Now()
+		cf.connErr = err
+	} else {
+		cf.connErr = nil
 	}
-	cf.connErr = connErr
+
 }
 
 func (cf *connConf) connectEnable() (err error) {
-	if cf.connErr && time.Now().Sub(cf.connErrTime) < ReconnectInterval {
-		err = errors.New("Connection is disconnected.")
+	cf.lock.Lock()
+	defer cf.lock.Unlock()
+	if cf.connErr != nil && time.Now().Sub(cf.connErrTime) < ReconnectInterval {
+		err = cf.connErr //errors.New("Connection is disconnected, addr is " + cf.addr)
+	}
+	if err == nil && cf.connErr != nil {
+		cf.connErr = nil
 	}
 	return
 }
@@ -145,15 +157,15 @@ func (this *Client) connect(connConf *connConf) (conn *iConn, err error) {
 
 	if err == nil {
 		conn = &iConn{Conn: c}
+	} else {
+		connConf.connectError(err)
 	}
-	connConf.connectError(err != nil)
 
 	return
 }
 
 func (this *Client) Close() {
 	this.pool.Release()
-	close(this.connConfChan)
 }
 
 //Send notification, no return value
